@@ -49,6 +49,15 @@ def init_db():
 
     conn.commit()
 
+    cur.execute("SELECT COUNT(*) FROM subjects")
+    subject_count = cur.fetchone()[0]
+
+    if subject_count == 0:
+        cur.execute("INSERT INTO subjects (name) VALUES (?)", ("인간학",))
+
+    conn.commit()
+    conn.close()
+
     # 기본 과목
     default_subjects = ["인간학", "자료구조", "운영체제"]
     for subject in default_subjects:
