@@ -72,20 +72,48 @@ def delete_subject(subject: str):
         subject_dir.rmdir()
 
 
+def remove_emoji(text: str) -> str:
+    """
+    PDF에서 깨지는 이모지 제거
+    대부분의 이모지는 BMP 바깥 영역에 있어서 제거 가능
+    """
+    return re.sub(r"[^\u0000-\uFFFF]", "", text)
+
+
 def markdown_to_plain_text(md: str) -> str:
+    """
+    PDF용 텍스트 정리:
+    - 이모지 제거
+    - 마크다운 문법 단순화
+    """
+    md = remove_emoji(md)
+
     lines = md.splitlines()
     result = []
 
     for line in lines:
-        line = re.sub(r"^#{1,6}\s*", "", line)
-        line = re.sub(r"^\-\s*", "• ", line)
-        line = re.sub(r"^\d+\.\s*", "- ", line)
+        line = re.sub(r"^#{1,6}\s*", "", line)    # 제목 표시 제거
+        line = re.sub(r"^\-\s*", "• ", line)      # bullet 통일
+        line = re.sub(r"^\d+\.\s*", "- ", line)   # 숫자목록 통일
         result.append(line)
 
     return "\n".join(result)
 
 
+def split_long_line(text: str, max_chars: int = 55):
+    lines = []
+    while len(text) > max_chars:
+        lines.append(text[:max_chars])
+        text = text[max_chars:]
+    lines.append(text)
+    return lines
+
+
 def create_pdf_bytes(title: str, content: str) -> bytes:
+    """
+    웹에서는 이모지 포함 표시,
+    PDF에서는 이모지 제거 후 저장
+    """
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
@@ -95,25 +123,23 @@ def create_pdf_bytes(title: str, content: str) -> bytes:
     x = 50
     y = height - 50
 
+    safe_title = remove_emoji(title)
+    safe_content = markdown_to_plain_text(content)
+
+    # 제목
     c.setFont("HYSMyeongJo-Medium", 16)
-    c.drawString(x, y, title)
+    c.drawString(x, y, safe_title)
     y -= 30
 
+    # 본문
     c.setFont("HYSMyeongJo-Medium", 11)
 
-    plain_text = markdown_to_plain_text(content)
-    max_chars = 55
-
     lines = []
-    for paragraph in plain_text.split("\n"):
+    for paragraph in safe_content.split("\n"):
         if not paragraph.strip():
             lines.append("")
             continue
-
-        while len(paragraph) > max_chars:
-            lines.append(paragraph[:max_chars])
-            paragraph = paragraph[max_chars:]
-        lines.append(paragraph)
+        lines.extend(split_long_line(paragraph, max_chars=55))
 
     for line in lines:
         if y < 50:
@@ -253,7 +279,7 @@ with right:
                     st.download_button(
                         "PDF 다운로드",
                         data=pdf_bytes,
-                        file_name=f"{current_path.stem}.pdf",
+                        file_name=f"{remove_emoji(current_path.stem)}.pdf",
                         mime="application/pdf"
                     )
 
