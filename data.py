@@ -16,7 +16,6 @@ BASE_DIR.mkdir(exist_ok=True)
 
 DEFAULT_SUBJECTS = ["인간학", "자료구조", "운영체제"]
 
-
 if "subjects" not in st.session_state:
     existing = [p.name for p in BASE_DIR.iterdir() if p.is_dir()]
     st.session_state.subjects = sorted(list(set(DEFAULT_SUBJECTS + existing)))
@@ -130,6 +129,7 @@ def create_pdf_bytes(title: str, content: str) -> bytes:
     return buffer.getvalue()
 
 
+# ------------------- 사이드바 -------------------
 st.sidebar.title("과목 관리")
 
 new_subject = st.sidebar.text_input("새 과목 이름")
@@ -164,9 +164,12 @@ if st.sidebar.button("현재 과목 삭제"):
         st.session_state.subjects.remove(selected_subject)
         st.session_state.selected_subject = st.session_state.subjects[0]
         st.session_state.selected_file = None
+        st.session_state.edit_mode = False
         st.sidebar.success(f"{selected_subject} 과목이 삭제되었습니다.")
         st.rerun()
 
+
+# ------------------- 메인 -------------------
 st.title("필기 정리 사이트")
 st.caption(f"현재 과목: {selected_subject}")
 
@@ -188,35 +191,9 @@ with left:
                 st.rerun()
 
 with right:
-    tab1, tab2, tab3 = st.tabs(["새 파일 만들기", "파일 업로드", "파일 보기/수정"])
+    tab1, tab2 = st.tabs(["파일 업로드", "파일 보기/수정"])
 
     with tab1:
-        st.subheader("새 TXT 파일 만들기")
-
-        with st.form("create_form"):
-            title = st.text_input("파일 제목")
-            content = st.text_area(
-                "내용 입력",
-                height=350,
-                placeholder="# 제목\n\n## 핵심 개념\n- 내용 1\n- 내용 2"
-            )
-            submitted = st.form_submit_button("저장")
-
-        if submitted:
-            clean_title = sanitize_name(title)
-            if not clean_title:
-                st.warning("파일 제목을 입력하세요.")
-            elif not content.strip():
-                st.warning("내용을 입력하세요.")
-            else:
-                filename = f"{clean_title}.txt"
-                file_path = subject_dir / filename
-                write_file(file_path, content)
-                st.session_state.selected_file = filename
-                st.success(f"{filename} 저장 완료")
-                st.rerun()
-
-    with tab2:
         st.subheader("정리된 TXT 파일 업로드")
 
         uploaded_file = st.file_uploader("TXT 업로드", type=["txt"])
@@ -248,7 +225,7 @@ with right:
                     st.success(f"{filename} 저장 완료")
                     st.rerun()
 
-    with tab3:
+    with tab2:
         st.subheader("파일 보기 / 수정")
 
         if not st.session_state.selected_file:
