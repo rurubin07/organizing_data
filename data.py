@@ -1,6 +1,7 @@
 import io
 import re
-from pathlib import Path
+import sqlite3
+from datetime import datetime
 
 import streamlit as st
 from reportlab.lib.pagesizes import A4
@@ -9,92 +10,95 @@ from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfgen import canvas
 
 
+# -----------------------------
+# 기본 설정
+# -----------------------------
 st.set_page_config(page_title="필기 정리 사이트", layout="wide")
+DB_PATH = "notes.db"
 
-BASE_DIR = Path("notes")
-BASE_DIR.mkdir(exist_ok=True)
 
-DEFAULT_SUBJECTS = ["인간학", "자료구조", "운영체제"]
+# -----------------------------
+# DB 연결 / 초기화
+# -----------------------------
+def get_connection():
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
-if "subjects" not in st.session_state:
-    existing = [p.name for p in BASE_DIR.iterdir() if p.is_dir()]
-    st.session_state.subjects = sorted(list(set(DEFAULT_SUBJECTS + existing)))
 
-if not st.session_state.subjects:
-    st.session_state.subjects = DEFAULT_SUBJECTS.copy()
+def init_db():
+    conn = get_connection()
+    cur = conn.cursor()
 
-if "selected_subject" not in st.session_state:
-    st.session_state.selected_subject = st.session_state.subjects[0]
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS subjects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL
+        )
+    """)
 
-if "selected_file" not in st.session_state:
-    st.session_state.selected_file = None
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subject_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (subject_id) REFERENCES subjects(id)
+        )
+    """)
+
+    conn.commit()
+
+    # 기본 과목
+    default_subjects = ["인간학", "자료구조", "운영체제"]
+    for subject in default_subjects:
+        try:
+            cur.execute("INSERT INTO subjects (name) VALUES (?)", (subject,))
+        except sqlite3.IntegrityError:
+            pass
+
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+
+# -----------------------------
+# 세션 상태
+# -----------------------------
+if "selected_subject_id" not in st.session_state:
+    st.session_state.selected_subject_id = None
+
+if "selected_note_id" not in st.session_state:
+    st.session_state.selected_note_id = None
 
 if "edit_mode" not in st.session_state:
     st.session_state.edit_mode = False
 
 
+# -----------------------------
+# 유틸 함수
+# -----------------------------
 def sanitize_name(name: str) -> str:
     name = name.strip()
     name = re.sub(r'[\\/*?:"<>|]', "_", name)
     return name
 
 
-def ensure_subject_dir(subject: str) -> Path:
-    subject_dir = BASE_DIR / subject
-    subject_dir.mkdir(parents=True, exist_ok=True)
-    return subject_dir
-
-
-def get_subject_files(subject: str):
-    subject_dir = ensure_subject_dir(subject)
-    return sorted(subject_dir.glob("*.txt"), key=lambda x: x.name.lower())
-
-
-def read_file(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
-
-
-def write_file(path: Path, content: str):
-    path.write_text(content, encoding="utf-8")
-
-
-def delete_file(path: Path):
-    if path.exists():
-        path.unlink()
-
-
-def delete_subject(subject: str):
-    subject_dir = BASE_DIR / subject
-    if subject_dir.exists() and subject_dir.is_dir():
-        for file in subject_dir.glob("*"):
-            if file.is_file():
-                file.unlink()
-        subject_dir.rmdir()
-
-
 def remove_emoji(text: str) -> str:
-    """
-    PDF에서 깨지는 이모지 제거
-    대부분의 이모지는 BMP 바깥 영역에 있어서 제거 가능
-    """
     return re.sub(r"[^\u0000-\uFFFF]", "", text)
 
 
 def markdown_to_plain_text(md: str) -> str:
-    """
-    PDF용 텍스트 정리:
-    - 이모지 제거
-    - 마크다운 문법 단순화
-    """
     md = remove_emoji(md)
-
     lines = md.splitlines()
     result = []
 
     for line in lines:
-        line = re.sub(r"^#{1,6}\s*", "", line)    # 제목 표시 제거
-        line = re.sub(r"^\-\s*", "• ", line)      # bullet 통일
-        line = re.sub(r"^\d+\.\s*", "- ", line)   # 숫자목록 통일
+        line = re.sub(r"^#{1,6}\s*", "", line)
+        line = re.sub(r"^\-\s*", "• ", line)
+        line = re.sub(r"^\d+\.\s*", "- ", line)
         result.append(line)
 
     return "\n".join(result)
@@ -110,10 +114,6 @@ def split_long_line(text: str, max_chars: int = 55):
 
 
 def create_pdf_bytes(title: str, content: str) -> bytes:
-    """
-    웹에서는 이모지 포함 표시,
-    PDF에서는 이모지 제거 후 저장
-    """
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
@@ -126,12 +126,10 @@ def create_pdf_bytes(title: str, content: str) -> bytes:
     safe_title = remove_emoji(title)
     safe_content = markdown_to_plain_text(content)
 
-    # 제목
     c.setFont("HYSMyeongJo-Medium", 16)
     c.drawString(x, y, safe_title)
     y -= 30
 
-    # 본문
     c.setFont("HYSMyeongJo-Medium", 11)
 
     lines = []
@@ -155,7 +153,112 @@ def create_pdf_bytes(title: str, content: str) -> bytes:
     return buffer.getvalue()
 
 
-# ------------------- 사이드바 -------------------
+# -----------------------------
+# DB 함수
+# -----------------------------
+def get_subjects():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name FROM subjects ORDER BY name")
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def add_subject(name: str):
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("INSERT INTO subjects (name) VALUES (?)", (name,))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        pass
+    conn.close()
+
+
+def delete_subject(subject_id: int):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM notes WHERE subject_id = ?", (subject_id,))
+    cur.execute("DELETE FROM subjects WHERE id = ?", (subject_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_notes_by_subject(subject_id: int):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, title, updated_at
+        FROM notes
+        WHERE subject_id = ?
+        ORDER BY updated_at DESC
+    """, (subject_id,))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def get_note(note_id: int):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, subject_id, title, content, created_at, updated_at
+        FROM notes
+        WHERE id = ?
+    """, (note_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def add_note(subject_id: int, title: str, content: str):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO notes (subject_id, title, content, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, (subject_id, title, content, now, now))
+    conn.commit()
+    note_id = cur.lastrowid
+    conn.close()
+    return note_id
+
+
+def update_note(note_id: int, new_title: str, new_content: str):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE notes
+        SET title = ?, content = ?, updated_at = ?
+        WHERE id = ?
+    """, (new_title, new_content, now, note_id))
+    conn.commit()
+    conn.close()
+
+
+def delete_note(note_id: int):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+    conn.commit()
+    conn.close()
+
+
+# -----------------------------
+# 초기 선택값 보정
+# -----------------------------
+subjects = get_subjects()
+
+if subjects and st.session_state.selected_subject_id is None:
+    st.session_state.selected_subject_id = subjects[0][0]
+
+
+# -----------------------------
+# 사이드바
+# -----------------------------
 st.sidebar.title("과목 관리")
 
 new_subject = st.sidebar.text_input("새 과목 이름")
@@ -164,55 +267,71 @@ if st.sidebar.button("과목 추가"):
     subject_name = sanitize_name(new_subject)
     if not subject_name:
         st.sidebar.warning("과목명을 입력하세요.")
-    elif subject_name in st.session_state.subjects:
-        st.sidebar.warning("이미 존재하는 과목입니다.")
     else:
-        st.session_state.subjects.append(subject_name)
-        st.session_state.subjects.sort()
-        ensure_subject_dir(subject_name)
-        st.session_state.selected_subject = subject_name
-        st.session_state.selected_file = None
+        add_subject(subject_name)
+        subjects = get_subjects()
+        matched = [s for s in subjects if s[1] == subject_name]
+        if matched:
+            st.session_state.selected_subject_id = matched[0][0]
+        st.session_state.selected_note_id = None
         st.sidebar.success(f"{subject_name} 과목이 추가되었습니다.")
         st.rerun()
 
-selected_subject = st.sidebar.selectbox(
+subjects = get_subjects()
+
+if not subjects:
+    st.error("과목이 없습니다.")
+    st.stop()
+
+subject_names = [s[1] for s in subjects]
+subject_ids = [s[0] for s in subjects]
+
+current_index = 0
+if st.session_state.selected_subject_id in subject_ids:
+    current_index = subject_ids.index(st.session_state.selected_subject_id)
+
+selected_subject_name = st.sidebar.selectbox(
     "과목 선택",
-    st.session_state.subjects,
-    index=st.session_state.subjects.index(st.session_state.selected_subject)
+    subject_names,
+    index=current_index
 )
-st.session_state.selected_subject = selected_subject
+
+selected_subject_id = subjects[subject_names.index(selected_subject_name)][0]
+st.session_state.selected_subject_id = selected_subject_id
 
 if st.sidebar.button("현재 과목 삭제"):
-    if len(st.session_state.subjects) == 1:
+    if len(subjects) == 1:
         st.sidebar.error("마지막 과목은 삭제할 수 없습니다.")
     else:
-        delete_subject(selected_subject)
-        st.session_state.subjects.remove(selected_subject)
-        st.session_state.selected_subject = st.session_state.subjects[0]
-        st.session_state.selected_file = None
+        delete_subject(selected_subject_id)
+        subjects = get_subjects()
+        st.session_state.selected_subject_id = subjects[0][0]
+        st.session_state.selected_note_id = None
         st.session_state.edit_mode = False
-        st.sidebar.success(f"{selected_subject} 과목이 삭제되었습니다.")
+        st.sidebar.success(f"{selected_subject_name} 과목이 삭제되었습니다.")
         st.rerun()
 
 
-# ------------------- 메인 -------------------
+# -----------------------------
+# 메인 화면
+# -----------------------------
 st.title("필기 정리 사이트")
-st.caption(f"현재 과목: {selected_subject}")
+st.caption(f"현재 과목: {selected_subject_name}")
 
-subject_dir = ensure_subject_dir(selected_subject)
-files = get_subject_files(selected_subject)
+notes = get_notes_by_subject(selected_subject_id)
 
 left, right = st.columns([1, 2], gap="large")
 
 with left:
     st.subheader("파일 리스트")
 
-    if not files:
-        st.info("이 과목에는 아직 파일이 없습니다.")
+    if not notes:
+        st.info("이 과목에는 아직 저장된 파일이 없습니다.")
     else:
-        for file_path in files:
-            if st.button(file_path.name, key=f"{selected_subject}_{file_path.name}"):
-                st.session_state.selected_file = file_path.name
+        for note_id, note_title, updated_at in notes:
+            label = f"{note_title}\n({updated_at})"
+            if st.button(label, key=f"note_{note_id}"):
+                st.session_state.selected_note_id = note_id
                 st.session_state.edit_mode = False
                 st.rerun()
 
@@ -226,7 +345,7 @@ with right:
 
         if uploaded_file is not None:
             uploaded_content = uploaded_file.read().decode("utf-8")
-            default_name = Path(uploaded_file.name).stem
+            default_name = sanitize_name(uploaded_file.name.rsplit(".", 1)[0])
             custom_name = st.text_input("저장할 파일 이름", value=default_name)
 
             col1, col2 = st.columns(2)
@@ -244,42 +363,42 @@ with right:
                 if not clean_name:
                     st.warning("파일 이름을 입력하세요.")
                 else:
-                    filename = f"{clean_name}.txt"
-                    file_path = subject_dir / filename
-                    write_file(file_path, uploaded_content)
-                    st.session_state.selected_file = filename
-                    st.success(f"{filename} 저장 완료")
+                    note_id = add_note(selected_subject_id, clean_name, uploaded_content)
+                    st.session_state.selected_note_id = note_id
+                    st.success(f"{clean_name} 저장 완료")
                     st.rerun()
 
     with tab2:
         st.subheader("파일 보기 / 수정")
 
-        if not st.session_state.selected_file:
+        if not st.session_state.selected_note_id:
             st.info("왼쪽에서 파일을 선택하세요.")
         else:
-            current_path = subject_dir / st.session_state.selected_file
+            note = get_note(st.session_state.selected_note_id)
 
-            if not current_path.exists():
+            if note is None:
                 st.warning("선택한 파일이 존재하지 않습니다.")
             else:
-                current_content = read_file(current_path)
+                note_id, subject_id, title, content, created_at, updated_at = note
+
+                st.caption(f"생성: {created_at} | 수정: {updated_at}")
 
                 top1, top2, top3, top4 = st.columns([1, 1, 1, 1])
 
                 with top1:
                     st.download_button(
                         "TXT 다운로드",
-                        data=current_content,
-                        file_name=current_path.name,
+                        data=content,
+                        file_name=f"{title}.txt",
                         mime="text/plain"
                     )
 
                 with top2:
-                    pdf_bytes = create_pdf_bytes(current_path.stem, current_content)
+                    pdf_bytes = create_pdf_bytes(title, content)
                     st.download_button(
                         "PDF 다운로드",
                         data=pdf_bytes,
-                        file_name=f"{remove_emoji(current_path.stem)}.pdf",
+                        file_name=f"{remove_emoji(title)}.pdf",
                         mime="application/pdf"
                     )
 
@@ -290,8 +409,8 @@ with right:
 
                 with top4:
                     if st.button("파일 삭제"):
-                        delete_file(current_path)
-                        st.session_state.selected_file = None
+                        delete_note(note_id)
+                        st.session_state.selected_note_id = None
                         st.session_state.edit_mode = False
                         st.success("파일이 삭제되었습니다.")
                         st.rerun()
@@ -302,8 +421,8 @@ with right:
                     st.markdown("### 파일 수정 중")
 
                     with st.form("edit_form"):
-                        new_title = st.text_input("파일 제목", value=current_path.stem)
-                        new_content = st.text_area("내용 수정", value=current_content, height=400)
+                        new_title = st.text_input("파일 제목", value=title)
+                        new_content = st.text_area("내용 수정", value=content, height=400)
                         save_edit = st.form_submit_button("수정 저장")
 
                     if save_edit:
@@ -313,20 +432,13 @@ with right:
                         elif not new_content.strip():
                             st.warning("내용을 입력하세요.")
                         else:
-                            new_filename = f"{clean_title}.txt"
-                            new_path = subject_dir / new_filename
-
-                            if new_path != current_path and current_path.exists():
-                                current_path.unlink()
-
-                            write_file(new_path, new_content)
-                            st.session_state.selected_file = new_filename
+                            update_note(note_id, clean_title, new_content)
                             st.session_state.edit_mode = False
                             st.success("파일이 수정되었습니다.")
                             st.rerun()
 
                 else:
-                    st.markdown(current_content)
+                    st.markdown(content)
                     st.markdown("---")
                     with st.expander("원본 텍스트 보기"):
-                        st.text(current_content)
+                        st.text(content)
