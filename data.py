@@ -49,22 +49,12 @@ def init_db():
 
     conn.commit()
 
+    # 과목이 하나도 없을 때만 기본 과목 1개 생성
     cur.execute("SELECT COUNT(*) FROM subjects")
     subject_count = cur.fetchone()[0]
 
     if subject_count == 0:
         cur.execute("INSERT INTO subjects (name) VALUES (?)", ("인간학",))
-
-    conn.commit()
-    conn.close()
-
-    # 기본 과목
-    default_subjects = ["인간학", "자료구조", "운영체제"]
-    for subject in default_subjects:
-        try:
-            cur.execute("INSERT INTO subjects (name) VALUES (?)", (subject,))
-        except sqlite3.IntegrityError:
-            pass
 
     conn.commit()
     conn.close()
@@ -125,7 +115,7 @@ def split_long_line(text: str, max_chars: int = 55):
 def create_pdf_bytes(title: str, content: str) -> bytes:
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
+    _, height = A4
 
     pdfmetrics.registerFont(UnicodeCIDFont("HYSMyeongJo-Medium"))
 
@@ -201,7 +191,7 @@ def get_notes_by_subject(subject_id: int):
         SELECT id, title, updated_at
         FROM notes
         WHERE subject_id = ?
-        ORDER BY updated_at DESC
+        ORDER BY updated_at DESC, id DESC
     """, (subject_id,))
     rows = cur.fetchall()
     conn.close()
@@ -261,8 +251,13 @@ def delete_note(note_id: int):
 # -----------------------------
 subjects = get_subjects()
 
-if subjects and st.session_state.selected_subject_id is None:
+if subjects and (
+    st.session_state.selected_subject_id is None
+    or st.session_state.selected_subject_id not in [s[0] for s in subjects]
+):
     st.session_state.selected_subject_id = subjects[0][0]
+    st.session_state.selected_note_id = None
+    st.session_state.edit_mode = False
 
 
 # -----------------------------
@@ -277,14 +272,21 @@ if st.sidebar.button("과목 추가"):
     if not subject_name:
         st.sidebar.warning("과목명을 입력하세요.")
     else:
-        add_subject(subject_name)
-        subjects = get_subjects()
-        matched = [s for s in subjects if s[1] == subject_name]
-        if matched:
-            st.session_state.selected_subject_id = matched[0][0]
-        st.session_state.selected_note_id = None
-        st.sidebar.success(f"{subject_name} 과목이 추가되었습니다.")
-        st.rerun()
+        old_subjects = get_subjects()
+        old_names = [s[1] for s in old_subjects]
+
+        if subject_name in old_names:
+            st.sidebar.warning("이미 존재하는 과목입니다.")
+        else:
+            add_subject(subject_name)
+            subjects = get_subjects()
+            matched = [s for s in subjects if s[1] == subject_name]
+            if matched:
+                st.session_state.selected_subject_id = matched[0][0]
+            st.session_state.selected_note_id = None
+            st.session_state.edit_mode = False
+            st.sidebar.success(f"{subject_name} 과목이 추가되었습니다.")
+            st.rerun()
 
 subjects = get_subjects()
 
@@ -312,12 +314,14 @@ if st.sidebar.button("현재 과목 삭제"):
     if len(subjects) == 1:
         st.sidebar.error("마지막 과목은 삭제할 수 없습니다.")
     else:
+        deleted_name = selected_subject_name
         delete_subject(selected_subject_id)
+
         subjects = get_subjects()
         st.session_state.selected_subject_id = subjects[0][0]
         st.session_state.selected_note_id = None
         st.session_state.edit_mode = False
-        st.sidebar.success(f"{selected_subject_name} 과목이 삭제되었습니다.")
+        st.sidebar.success(f"{deleted_name} 과목이 삭제되었습니다.")
         st.rerun()
 
 
@@ -335,11 +339,11 @@ with left:
     st.subheader("파일 리스트")
 
     if not notes:
-        st.info("이 과목에는 아직 저장된 파일이 없습니다.")
+        st.info("이 과목에는 저장된 파일이 없습니다.")
     else:
         for note_id, note_title, updated_at in notes:
-            label = f"{note_title}\n({updated_at})"
-            if st.button(label, key=f"note_{note_id}"):
+            button_label = f"{note_title}\n({updated_at})"
+            if st.button(button_label, key=f"note_{note_id}"):
                 st.session_state.selected_note_id = note_id
                 st.session_state.edit_mode = False
                 st.rerun()
@@ -374,6 +378,7 @@ with right:
                 else:
                     note_id = add_note(selected_subject_id, clean_name, uploaded_content)
                     st.session_state.selected_note_id = note_id
+                    st.session_state.edit_mode = False
                     st.success(f"{clean_name} 저장 완료")
                     st.rerun()
 
@@ -381,7 +386,7 @@ with right:
         st.subheader("파일 보기 / 수정")
 
         if not st.session_state.selected_note_id:
-            st.info("왼쪽에서 파일을 선택하세요.")
+            st.info("왼쪽 파일 리스트에서 파일을 선택하세요.")
         else:
             note = get_note(st.session_state.selected_note_id)
 
